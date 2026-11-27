@@ -1,0 +1,787 @@
+---
+title: "Case 31: Summary of Data Analysis for R3, R6, and R4"
+subtitle: "Employees Federal Credit Union (EFCU)"
+author: "Ruben Garcia"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: show
+    embed-resources: true
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+---
+
+# Overview
+
+This report summarizes the analysis for three research questions in the EFCU member survey:
+
+- **R3:** What are members' attitudes and beliefs about the proficiency of credit union employees?
+- **R6:** What are members' attitudes and beliefs about how effectively the credit union is operated?
+- **R4:** Do members who live in the headquarters area differ from members who live elsewhere in (a) attitude toward employee proficiency, (b) awareness of services, and (c) operational effectiveness?
+
+**How the earlier reliability and factor analyses shape this report.** Those results are reported in the previous assignment, so they are not repeated here; only the decisions are used:
+
+- Q3 to Q6 formed one reliable factor, so they are combined into a single **employee proficiency score** (`att_employee`, the mean of Q3 to Q6) for R3 and R4a.
+- Q31 to Q34 did not form a reliable scale, so no composite is made. In R6 and R4c these four items are analyzed **one at a time**.
+
+Throughout, I look at frequencies and means first, describe the story the data tell, and then use statistical tests to confirm it. Test statistics are kept inside parentheses.
+
+```{r}
+#| label: setup
+
+library(tidyverse)
+library(haven)
+library(labelled)
+library(gt)
+
+theme_set(theme_minimal(base_size = 13))
+```
+
+```{r}
+#| label: import
+
+# Cleaned data from IC10-2-1 (keeps value labels and variable labels)
+data <- read_sav("Case 31 Data_efcu_1_RG_cleaned.sav")
+
+# Plain-number copy for means, t-tests, and percentages
+data_numeric <- data |>
+  mutate(across(everything(), as.numeric))
+
+n_respondents <- nrow(data)
+```
+
+```{r}
+#| label: analysis-data
+
+# Step 1: employee proficiency score (mean of Q3 to Q6, kept on the 1-5 scale)
+data_analysis <- data_numeric |>
+  mutate(att_employee = rowMeans(pick(q3:q6)))
+
+# Step 2: member residence as a labeled grouping variable (Q38: 1 = yes, 2 = no)
+data_analysis <- data_analysis |>
+  mutate(
+    residence = factor(
+      q38,
+      levels = c(1, 2),
+      labels = c("Lives in HQ area", "Lives elsewhere")
+    )
+  )
+
+# Group sizes
+data_analysis |> count(residence)
+```
+
+```{r}
+#| label: helpers
+
+# ---- formatting helpers ----
+fmt_p <- function(p) {
+  if_else(p < .001, "p < .001", paste0("p = ", sub("^0", "", sprintf("%.3f", p))))
+}
+
+# ---- frequency table with value labels ----
+distribution_table <- function(variable_name) {
+  variable_labelled <- data[[variable_name]]
+
+  codes <- as.numeric(variable_labelled)
+  labels_text <- as.character(as_factor(variable_labelled))
+
+  raw_table <- tibble(code = codes, response = labels_text)
+  raw_table <- raw_table |>
+    mutate(response = replace_na(response, "No opinion / no answer (missing)"))
+
+  counts <- raw_table |> count(code, response)
+  n_valid <- sum(counts |> filter(!is.na(code)) |> pull(n))
+
+  counts |>
+    mutate(
+      variable = variable_name,
+      percent_of_valid = if_else(is.na(code), NA_real_, round(n / n_valid * 100, 1))
+    ) |>
+    arrange(code) |>
+    select(variable, code, response, n, percent_of_valid)
+}
+
+get_percent <- function(freq_table, code_value) {
+  freq_table |> filter(code == code_value) |> pull(percent_of_valid)
+}
+
+# ---- one-sample t-test against the scale midpoint of 3 ----
+one_sample_row <- function(variable_name, description, test_value = 3) {
+  all_values <- data_analysis[[variable_name]]
+  valid_values <- all_values[!is.na(all_values)]
+
+  test_result <- t.test(valid_values, mu = test_value)
+  test_tidy <- broom::tidy(test_result)
+
+  tibble(
+    item = variable_name,
+    description = description,
+    n = length(valid_values),
+    mean = mean(valid_values),
+    sd = sd(valid_values),
+    percent_4_or_5 = mean(valid_values >= 4) * 100,
+    t = test_tidy |> pull(statistic),
+    df = test_tidy |> pull(parameter),
+    p = test_tidy |> pull(p.value),
+    conf_low = test_tidy |> pull(conf.low),
+    conf_high = test_tidy |> pull(conf.high)
+  )
+}
+
+# ---- independent-groups (Welch) t-test by residence ----
+group_ttest_row <- function(variable_name, description) {
+  test_data <- data_analysis |>
+    select(residence, value = all_of(variable_name)) |>
+    drop_na()
+
+  group_summary <- test_data |>
+    summarise(n = n(), mean = mean(value), sd = sd(value), .by = residence)
+
+  hq_row <- group_summary |> filter(residence == "Lives in HQ area")
+  else_row <- group_summary |> filter(residence == "Lives elsewhere")
+
+  n_hq <- hq_row |> pull(n)
+  n_else <- else_row |> pull(n)
+  mean_hq <- hq_row |> pull(mean)
+  mean_else <- else_row |> pull(mean)
+  sd_hq <- hq_row |> pull(sd)
+  sd_else <- else_row |> pull(sd)
+
+  pooled_sd <- sqrt(((n_hq - 1) * sd_hq^2 + (n_else - 1) * sd_else^2) / (n_hq + n_else - 2))
+
+  test_result <- t.test(value ~ residence, data = test_data)
+  test_tidy <- broom::tidy(test_result)
+
+  tibble(
+    item = variable_name,
+    description = description,
+    n_hq = n_hq,
+    mean_hq = mean_hq,
+    sd_hq = sd_hq,
+    n_else = n_else,
+    mean_else = mean_else,
+    sd_else = sd_else,
+    difference = mean_hq - mean_else,
+    t = test_tidy |> pull(statistic),
+    df = test_tidy |> pull(parameter),
+    p = test_tidy |> pull(p.value),
+    cohens_d = (mean_hq - mean_else) / pooled_sd
+  )
+}
+
+# ---- chi-square test of independence by residence ----
+# Fisher's exact test is used when any expected count is below 5
+chisq_row <- function(variable_name, description) {
+  test_data <- data_analysis |>
+    select(residence, value = all_of(variable_name)) |>
+    drop_na()
+
+  crosstab <- table(test_data |> pull(residence), test_data |> pull(value))
+
+  chi_result <- suppressWarnings(chisq.test(crosstab, correct = FALSE))
+  fisher_result <- fisher.test(crosstab)
+
+  n_total <- sum(crosstab)
+  chi_value <- as.numeric(chi_result |> pluck("statistic"))
+  min_expected <- min(chi_result |> pluck("expected"))
+
+  tibble(
+    item = variable_name,
+    description = description,
+    n = n_total,
+    chi_square = chi_value,
+    df = as.numeric(chi_result |> pluck("parameter")),
+    p_chi = chi_result |> pluck("p.value"),
+    p_fisher = fisher_result |> pluck("p.value"),
+    min_expected = min_expected,
+    cramers_v = sqrt(chi_value / (n_total * (min(dim(crosstab)) - 1)))
+  ) |>
+    mutate(p_reported = if_else(min_expected < 5, p_fisher, p_chi))
+}
+```
+
+# R3: Attitudes toward employee proficiency
+
+## Descriptive statistics
+
+```{r}
+#| label: tbl-r3-items
+#| tbl-cap: "R3: Agreement with each employee statement (percent of respondents, n = 128)"
+
+r3_labels <- c(
+  q3 = "Q3: Employees are courteous",
+  q4 = "Q4: Employees are helpful",
+  q5 = "Q5: Employees are professional",
+  q6 = "Q6: Employees are always available"
+)
+
+r3_long <- data_numeric |>
+  select(q3:q6) |>
+  pivot_longer(everything(), names_to = "item", values_to = "response")
+
+r3_summary <- r3_long |>
+  summarise(
+    mean = mean(response),
+    sd = sd(response),
+    percent_disagree = mean(response <= 2) * 100,
+    percent_uncertain = mean(response == 3) * 100,
+    percent_agree = mean(response >= 4) * 100,
+    .by = item
+  )
+
+r3_summary <- r3_summary |>
+  mutate(statement = r3_labels[item]) |>
+  select(statement, mean, sd, percent_disagree, percent_uncertain, percent_agree)
+
+r3_summary |>
+  gt() |>
+  fmt_number(columns = c(mean, sd, percent_disagree, percent_uncertain, percent_agree), decimals = 1) |>
+  cols_label(
+    statement = "Statement",
+    mean = "Mean",
+    sd = "SD",
+    percent_disagree = "% disagree (1-2)",
+    percent_uncertain = "% uncertain (3)",
+    percent_agree = "% agree (4-5)"
+  )
+```
+
+```{r}
+#| label: tbl-r3-composite
+#| tbl-cap: "R3: Employee proficiency score (mean of Q3 to Q6)"
+
+r3_composite_summary <- data_analysis |>
+  summarise(
+    n = n(),
+    mean = mean(att_employee),
+    median = median(att_employee),
+    sd = sd(att_employee),
+    min = min(att_employee),
+    max = max(att_employee),
+    percent_4_or_higher = mean(att_employee >= 4) * 100
+  )
+
+r3_composite_summary |>
+  gt() |>
+  fmt_number(columns = c(mean, median, sd, min, max, percent_4_or_higher), decimals = 2)
+```
+
+```{r}
+#| label: fig-r3
+#| fig-cap: "Distribution of the employee proficiency score (dashed line = midpoint of 3)"
+#| fig-height: 4
+
+ggplot(data_analysis, aes(x = att_employee)) +
+  geom_histogram(binwidth = 0.25, fill = "#1f4e79", color = "white") +
+  geom_vline(xintercept = 3, linetype = "dashed") +
+  scale_x_continuous(limits = c(1, 5.25), breaks = 1:5) +
+  labs(x = "Employee proficiency score (1-5)", y = "Number of members")
+```
+
+## One-group t-test (test value = 3)
+
+```{r}
+#| label: tbl-r3-ttest
+#| tbl-cap: "R3: One-sample t-test of the employee proficiency score against the midpoint of 3"
+
+r3_results <- one_sample_row("att_employee", "Employee proficiency score")
+
+r3_results |>
+  mutate(p_text = fmt_p(p)) |>
+  select(description, n, mean, sd, t, df, p_text) |>
+  gt() |>
+  fmt_number(columns = c(mean, sd, t), decimals = 2) |>
+  cols_label(description = "Score", p_text = "Significance")
+```
+
+```{r}
+#| label: r3-numbers
+
+r3_mean <- round(r3_results |> pull(mean), 2)
+r3_t <- round(r3_results |> pull(t), 2)
+r3_df <- r3_results |> pull(df)
+r3_p_text <- fmt_p(r3_results |> pull(p))
+r3_percent_4_plus <- round(r3_composite_summary |> pull(percent_4_or_higher), 1)
+
+r3_lowest_statement <- r3_summary |> slice_min(percent_agree, n = 1, with_ties = FALSE) |> pull(statement)
+r3_lowest_percent <- round(r3_summary |> slice_min(percent_agree, n = 1, with_ties = FALSE) |> pull(percent_agree), 1)
+r3_highest_statement <- r3_summary |> slice_max(percent_agree, n = 1, with_ties = FALSE) |> pull(statement)
+r3_highest_percent <- round(r3_summary |> slice_max(percent_agree, n = 1, with_ties = FALSE) |> pull(percent_agree), 1)
+```
+
+## R3 Interpretation
+
+Members hold clearly favorable attitudes toward EFCU employees. The average employee proficiency score is `r r3_mean` on the five-point scale, well above the neutral midpoint of 3 (t(`r r3_df`) = `r r3_t`, `r r3_p_text`; @tbl-r3-ttest), and `r r3_percent_4_plus`% of members have a score of 4 or higher (@tbl-r3-composite, @fig-r3).
+
+At the item level, most members agree with every statement (@tbl-r3-items). The strongest endorsement is for *`r r3_highest_statement`* (`r r3_highest_percent`% agree), and the weakest is for *`r r3_lowest_statement`* (`r r3_lowest_percent`% agree), which still reflects a clear majority.
+
+**Insight:** employees are a strength of the credit union. Members see them as courteous, helpful, professional, and available, so employee behavior is unlikely to be the reason members borrow elsewhere.
+
+# R4a: Residence and attitude toward employee proficiency
+
+## Descriptive statistics and independent-groups t-test
+
+```{r}
+#| label: tbl-r4a
+#| tbl-cap: "R4a: Employee proficiency score by residence (Welch independent-groups t-test)"
+
+r4a_results <- group_ttest_row("att_employee", "Employee proficiency score")
+
+r4a_results |>
+  mutate(p_text = fmt_p(p)) |>
+  select(description, n_hq, mean_hq, sd_hq, n_else, mean_else, sd_else, difference, t, df, p_text, cohens_d) |>
+  gt() |>
+  fmt_number(columns = c(mean_hq, sd_hq, mean_else, sd_else, difference, t, df, cohens_d), decimals = 2) |>
+  cols_label(
+    description = "Score",
+    n_hq = "n (HQ area)", mean_hq = "Mean (HQ area)", sd_hq = "SD (HQ area)",
+    n_else = "n (elsewhere)", mean_else = "Mean (elsewhere)", sd_else = "SD (elsewhere)",
+    difference = "Difference", p_text = "Significance", cohens_d = "Cohen's d"
+  )
+```
+
+```{r}
+#| label: fig-r4a
+#| fig-cap: "Employee proficiency score by residence (diamond = group mean)"
+#| fig-height: 4.2
+
+ggplot(data_analysis, aes(x = residence, y = att_employee)) +
+  geom_boxplot(fill = "#d9e2ee", outlier.shape = NA) +
+  geom_jitter(width = 0.12, alpha = 0.4, color = "#1f4e79") +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 5, color = "#c0504d") +
+  labs(x = NULL, y = "Employee proficiency score (1-5)")
+```
+
+```{r}
+#| label: r4a-numbers
+
+r4a_mean_hq <- round(r4a_results |> pull(mean_hq), 2)
+r4a_mean_else <- round(r4a_results |> pull(mean_else), 2)
+r4a_t <- round(r4a_results |> pull(t), 2)
+r4a_df <- round(r4a_results |> pull(df), 1)
+r4a_p <- r4a_results |> pull(p)
+r4a_p_text <- fmt_p(r4a_p)
+r4a_d <- round(r4a_results |> pull(cohens_d), 2)
+r4a_sig_word <- if_else(r4a_p < .05, "a significant", "no significant")
+```
+
+## R4a Interpretation
+
+Members who live in the headquarters area rate employee proficiency at `r r4a_mean_hq` on average, compared with `r r4a_mean_else` for members who live elsewhere (@tbl-r4a, @fig-r4a). There is `r r4a_sig_word` difference between the groups (t(`r r4a_df`) = `r r4a_t`, `r r4a_p_text`; d = `r r4a_d`).
+
+**Insight:** both groups are strongly positive about employees. Where a member lives does not change how they see employee proficiency, so employee service is consistently good for headquarters-area and out-of-area members alike.
+
+# R4b: Residence and awareness of services
+
+## Descriptive statistics
+
+```{r}
+#| label: r4b-prep
+
+service_labels <- var_label(select(data, q13:q26), unlist = TRUE)
+
+service_names <- tibble(
+  item = names(service_labels),
+  service = str_to_sentence(unname(service_labels))
+)
+
+awareness_long <- data_analysis |>
+  select(residence, q13:q26) |>
+  pivot_longer(-residence, names_to = "item", values_to = "response")
+
+awareness_counts <- awareness_long |>
+  count(item, residence, response)
+
+awareness_percent <- awareness_counts |>
+  mutate(percent = n / sum(n) * 100, .by = c(item, residence))
+
+awareness_percent <- awareness_percent |>
+  left_join(service_names, by = "item")
+
+# Percent unaware (code 3) and percent who have used the service (code 1) by group
+unaware_by_group <- awareness_percent |>
+  filter(response == 3) |>
+  select(item, service, residence, percent_unaware = percent)
+
+used_by_group <- awareness_percent |>
+  filter(response == 1) |>
+  select(item, residence, percent_used = percent)
+
+awareness_by_group <- unaware_by_group |>
+  left_join(used_by_group, by = c("item", "residence"))
+
+awareness_wide <- awareness_by_group |>
+  pivot_wider(
+    names_from = residence,
+    values_from = c(percent_unaware, percent_used),
+    values_fill = 0
+  )
+```
+
+```{r}
+#| label: tbl-r4b-desc
+#| tbl-cap: "R4b: Percent of members unaware of each service, and percent who have used it, by residence"
+
+awareness_wide |>
+  select(
+    service,
+    `percent_unaware_Lives in HQ area`, `percent_unaware_Lives elsewhere`,
+    `percent_used_Lives in HQ area`, `percent_used_Lives elsewhere`
+  ) |>
+  gt() |>
+  fmt_number(columns = -service, decimals = 1) |>
+  cols_label(
+    service = "Service",
+    `percent_unaware_Lives in HQ area` = "Unaware: HQ area",
+    `percent_unaware_Lives elsewhere` = "Unaware: elsewhere",
+    `percent_used_Lives in HQ area` = "Used: HQ area",
+    `percent_used_Lives elsewhere` = "Used: elsewhere"
+  )
+```
+
+```{r}
+#| label: fig-r4b
+#| fig-cap: "Percent of members unaware of each service, by residence"
+#| fig-height: 6
+#| fig-width: 9
+
+service_order <- awareness_by_group |>
+  summarise(avg_unaware = mean(percent_unaware), .by = service) |>
+  arrange(avg_unaware) |>
+  pull(service)
+
+unaware_plot_data <- awareness_by_group |>
+  mutate(service = factor(service, levels = service_order))
+
+ggplot(unaware_plot_data, aes(x = percent_unaware, y = service, color = residence)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c("Lives in HQ area" = "#1f4e79", "Lives elsewhere" = "#c0504d")) +
+  labs(x = "Percent unaware of the service", y = NULL, color = NULL) +
+  theme(legend.position = "top")
+```
+
+## Chi-square tests of independence
+
+```{r}
+#| label: tbl-r4b-chisq
+#| tbl-cap: "R4b: Residence by awareness category (aware and used / aware, not used / unaware) for each service"
+
+r4b_results <- bind_rows(
+  chisq_row("q13", "Regular share accounts"),
+  chisq_row("q14", "Special subaccounts"),
+  chisq_row("q15", "Christmas club accounts"),
+  chisq_row("q16", "Individual retirement accounts"),
+  chisq_row("q17", "MasterCard credit cards"),
+  chisq_row("q18", "Signature loans"),
+  chisq_row("q19", "New car loans"),
+  chisq_row("q20", "Late model car loans"),
+  chisq_row("q21", "Older model car loans"),
+  chisq_row("q22", "Household goods/appliance loans"),
+  chisq_row("q23", "Recreational loans"),
+  chisq_row("q24", "Share collateralized loans"),
+  chisq_row("q25", "IRA loans"),
+  chisq_row("q26", "Line of credit loans")
+)
+
+# Adjust for running 14 tests (Holm method)
+r4b_results <- r4b_results |>
+  mutate(p_holm = p.adjust(p_reported, method = "holm"))
+
+r4b_results |>
+  mutate(
+    p_text = fmt_p(p_reported),
+    p_holm_text = fmt_p(p_holm),
+    test_used = if_else(min_expected < 5, "Fisher exact", "Chi-square")
+  ) |>
+  select(description, n, chi_square, df, p_text, test_used, p_holm_text, cramers_v) |>
+  gt() |>
+  fmt_number(columns = c(chi_square, cramers_v), decimals = 2) |>
+  cols_label(
+    description = "Service", chi_square = "Chi-square", p_text = "p",
+    test_used = "p based on", p_holm_text = "Holm-adjusted p", cramers_v = "Cramer's V"
+  )
+```
+
+```{r}
+#| label: r4b-numbers
+
+r4b_n_tests <- nrow(r4b_results)
+r4b_n_sig <- r4b_results |> filter(p_reported < .05) |> nrow()
+r4b_n_sig_holm <- r4b_results |> filter(p_holm < .05) |> nrow()
+r4b_max_v <- round(max(r4b_results |> pull(cramers_v)), 2)
+
+r4b_largest_gap_row <- awareness_wide |>
+  mutate(gap = abs(`percent_unaware_Lives in HQ area` - `percent_unaware_Lives elsewhere`)) |>
+  slice_max(gap, n = 1, with_ties = FALSE)
+
+r4b_largest_gap_service <- r4b_largest_gap_row |> pull(service)
+r4b_largest_gap_points <- round(r4b_largest_gap_row |> pull(gap), 1)
+```
+
+## R4b Interpretation
+
+Awareness of EFCU services is very similar for members who live in the headquarters area and members who live elsewhere (@tbl-r4b-desc, @fig-r4b). Of the `r r4b_n_tests` services tested, `r r4b_n_sig` show a statistically significant association with residence, and `r r4b_n_sig_holm` remain significant after adjusting for the number of tests (@tbl-r4b-chisq). The associations that do appear are small (Cramer's V is at most `r r4b_max_v`). The largest raw gap is for *`r r4b_largest_gap_service`*, where the share unaware differs by about `r r4b_largest_gap_points` percentage points between the groups.
+
+**Insight:** where members live is not what explains awareness gaps. The services with low awareness (see R5) are low for everyone, so the communication fix should be credit-union-wide and not aimed at out-of-area members only. Several tables have very small cells (shown as Fisher exact in @tbl-r4b-chisq), so these tests have limited power.
+
+# R4c: Residence and operational effectiveness
+
+## Descriptive statistics and independent-groups t-tests (rating items)
+
+```{r}
+#| label: tbl-r4c-ttest
+#| tbl-cap: "R4c: Operational effectiveness ratings by residence (Welch independent-groups t-tests)"
+
+# Q10 and Q37 use the reversed versions (higher = better)
+r4c_ttest_results <- bind_rows(
+  group_ttest_row("q10r", "Q10: Accuracy of statements (1-4)"),
+  group_ttest_row("q31", "Q31: Personnel keep information confidential"),
+  group_ttest_row("q32", "Q32: Prompt in processing loan applications"),
+  group_ttest_row("q33", "Q33: Services meet needs of members"),
+  group_ttest_row("q34", "Q34: Loan applications simple and easy"),
+  group_ttest_row("q37r", "Q37: Overall management and operation")
+)
+
+# Adjust for running 6 tests (Holm method)
+r4c_ttest_results <- r4c_ttest_results |>
+  mutate(p_holm = p.adjust(p, method = "holm"))
+
+r4c_ttest_results |>
+  mutate(p_text = fmt_p(p), p_holm_text = fmt_p(p_holm)) |>
+  select(description, mean_hq, mean_else, difference, t, df, p_text, p_holm_text, cohens_d) |>
+  gt() |>
+  fmt_number(columns = c(mean_hq, mean_else, difference, t, df, cohens_d), decimals = 2) |>
+  cols_label(
+    description = "Item", mean_hq = "Mean (HQ area)", mean_else = "Mean (elsewhere)",
+    difference = "Difference", p_text = "p", p_holm_text = "Holm-adjusted p", cohens_d = "Cohen's d"
+  )
+```
+
+```{r}
+#| label: fig-r4c
+#| fig-cap: "Mean ratings by residence for the operational effectiveness items"
+#| fig-height: 5
+#| fig-width: 9
+
+r4c_plot_data <- r4c_ttest_results |>
+  select(description, `Lives in HQ area` = mean_hq, `Lives elsewhere` = mean_else) |>
+  pivot_longer(-description, names_to = "residence", values_to = "mean_rating")
+
+ggplot(r4c_plot_data, aes(x = mean_rating, y = description, color = residence)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c("Lives in HQ area" = "#1f4e79", "Lives elsewhere" = "#c0504d")) +
+  labs(x = "Mean rating", y = NULL, color = NULL) +
+  theme(legend.position = "top")
+```
+
+## Chi-square tests of independence (categorical items)
+
+```{r}
+#| label: tbl-r4c-pct
+#| tbl-cap: "R4c: Percent giving each response, by residence"
+
+r4c_cat_items <- data_analysis |>
+  select(residence, q11, q12) |>
+  mutate(q9_about_right = if_else(data_numeric |> pull(q9) == 3, 1, 0)) |>
+  mutate(q11 = if_else(q11 == 1, 1, if_else(q11 == 2, 0, NA_real_)))
+
+r4c_cat_items <- r4c_cat_items |>
+  mutate(q12 = if_else(q12 == 1, 1, if_else(q12 == 2, 0, NA_real_)))
+
+r4c_pct_table <- r4c_cat_items |>
+  pivot_longer(-residence, names_to = "item", values_to = "value") |>
+  summarise(percent_yes = mean(value, na.rm = TRUE) * 100, .by = c(item, residence)) |>
+  pivot_wider(names_from = residence, values_from = percent_yes)
+
+r4c_pct_table <- r4c_pct_table |>
+  mutate(
+    description = case_match(
+      item,
+      "q9_about_right" ~ "Q9: Statement frequency is about right",
+      "q11" ~ "Q11: Statements easy to understand (yes)",
+      "q12" ~ "Q12: Account information kept confidential (yes)"
+    )
+  ) |>
+  select(description, `Lives in HQ area`, `Lives elsewhere`)
+
+r4c_pct_table |>
+  gt() |>
+  fmt_number(columns = c(`Lives in HQ area`, `Lives elsewhere`), decimals = 1)
+```
+
+```{r}
+#| label: tbl-r4c-chisq
+#| tbl-cap: "R4c: Chi-square tests of independence (Fisher exact test where any expected count is below 5)"
+
+# Q9 is recoded: 1 = about right, 0 = not about right
+data_analysis <- data_analysis |>
+  mutate(q9_about_right = if_else(q9 == 3, 1, 0))
+
+r4c_chisq_results <- bind_rows(
+  chisq_row("q9_about_right", "Q9: Statement frequency about right"),
+  chisq_row("q11", "Q11: Statements easy to understand"),
+  chisq_row("q12", "Q12: Account information confidential")
+)
+
+r4c_chisq_results <- r4c_chisq_results |>
+  mutate(p_holm = p.adjust(p_reported, method = "holm"))
+
+r4c_chisq_results |>
+  mutate(
+    p_text = fmt_p(p_reported),
+    p_holm_text = fmt_p(p_holm),
+    test_used = if_else(min_expected < 5, "Fisher exact", "Chi-square")
+  ) |>
+  select(description, n, chi_square, df, p_text, test_used, p_holm_text, cramers_v) |>
+  gt() |>
+  fmt_number(columns = c(chi_square, cramers_v), decimals = 2) |>
+  cols_label(
+    description = "Item", chi_square = "Chi-square", p_text = "p",
+    test_used = "p based on", p_holm_text = "Holm-adjusted p", cramers_v = "Cramer's V"
+  )
+```
+
+```{r}
+#| label: r4c-numbers
+
+r4c_sig_items <- r4c_ttest_results |> filter(p < .05)
+r4c_n_sig_ttests <- nrow(r4c_sig_items)
+r4c_n_sig_holm <- r4c_ttest_results |> filter(p_holm < .05) |> nrow()
+r4c_n_sig_chisq <- r4c_chisq_results |> filter(p_reported < .05) |> nrow()
+
+q34_row <- r4c_ttest_results |> filter(item == "q34")
+q34_mean_hq <- round(q34_row |> pull(mean_hq), 2)
+q34_mean_else <- round(q34_row |> pull(mean_else), 2)
+q34_t <- round(q34_row |> pull(t), 2)
+q34_df <- round(q34_row |> pull(df), 1)
+q34_p_text <- fmt_p(q34_row |> pull(p))
+q34_holm_text <- fmt_p(q34_row |> pull(p_holm))
+```
+
+## R4c Interpretation
+
+Members in the headquarters area and elsewhere judge how EFCU operates in much the same way. Of the six rating items, `r r4c_n_sig_ttests` differ significantly by residence, and `r r4c_n_sig_chisq` of the three yes/no items do (@tbl-r4c-ttest, @tbl-r4c-chisq, @fig-r4c). The one rating difference is **Q34, simplicity of loan applications**: members living outside the headquarters area give a higher rating (`r q34_mean_else`) than members who live in the headquarters area (`r q34_mean_hq`) (t(`r q34_df`) = `r q34_t`, `r q34_p_text`). That result is not strong evidence on its own: it is one of six tests, and its Holm-adjusted p-value is `r q34_holm_text`, so it should be treated as a lead to explore and not a confirmed difference.
+
+**Insight:** operations are judged similarly by both groups (statements, confidentiality, speed, meeting needs, and overall management). If any group needs attention, it is the headquarters-area members and the loan application process, where ratings are lowest in the data.
+
+# R6: Attitudes toward how effectively the credit union is operated
+
+The earlier analysis showed that Q31 to Q34 do not form a reliable scale, so each is analyzed on its own.
+
+## Descriptive statistics: statements (Q9 to Q12)
+
+```{r}
+#| label: tbl-r6-freq
+#| tbl-cap: "R6: Account statements (percent of valid responses)"
+
+r6_q9 <- distribution_table("q9")
+r6_q10 <- distribution_table("q10")
+r6_q11 <- distribution_table("q11")
+r6_q12 <- distribution_table("q12")
+
+r6_frequencies <- bind_rows(r6_q9, r6_q10, r6_q11, r6_q12)
+
+r6_variable_names <- c(
+  q9 = "Q9: How often statements are received",
+  q10 = "Q10: Accuracy of statements",
+  q11 = "Q11: Statements easy to understand",
+  q12 = "Q12: Account information kept confidential"
+)
+
+r6_frequencies |>
+  filter(!is.na(code)) |>
+  mutate(variable = r6_variable_names[variable]) |>
+  select(variable, response, n, percent_of_valid) |>
+  gt(groupname_col = "variable") |>
+  cols_label(response = "Response", n = "n", percent_of_valid = "% of valid")
+```
+
+## One-group t-tests for the attitude items (test value = 3)
+
+```{r}
+#| label: tbl-r6-ttest
+#| tbl-cap: "R6: One-sample t-tests against the midpoint of 3 (1-5 scales, higher = more favorable)"
+
+r6_results <- bind_rows(
+  one_sample_row("q31", "Q31: Personnel keep information confidential"),
+  one_sample_row("q32", "Q32: Prompt in processing loan applications"),
+  one_sample_row("q33", "Q33: Services meet needs of members"),
+  one_sample_row("q34", "Q34: Loan applications simple and easy"),
+  one_sample_row("q37r", "Q37: Overall management and operation")
+)
+
+r6_results |>
+  mutate(p_text = fmt_p(p)) |>
+  select(description, n, mean, sd, percent_4_or_5, t, df, p_text) |>
+  gt() |>
+  fmt_number(columns = c(mean, sd, percent_4_or_5, t), decimals = 2) |>
+  cols_label(
+    description = "Item", percent_4_or_5 = "% rating 4-5",
+    p_text = "Significance"
+  )
+```
+
+```{r}
+#| label: fig-r6
+#| fig-cap: "Mean rating with 95% confidence interval (dashed line = midpoint of 3)"
+#| fig-height: 4.2
+#| fig-width: 9
+
+r6_plot_data <- r6_results |>
+  mutate(description = fct_reorder(description, mean))
+
+ggplot(r6_plot_data, aes(x = mean, y = description)) +
+  geom_vline(xintercept = 3, linetype = "dashed") +
+  geom_pointrange(aes(xmin = conf_low, xmax = conf_high), color = "#1f4e79") +
+  scale_x_continuous(limits = c(2.5, 5)) +
+  labs(x = "Mean rating (1-5)", y = NULL)
+```
+
+```{r}
+#| label: r6-numbers
+
+r6_pct_about_right <- get_percent(r6_q9, 3)
+r6_pct_accuracy_good <- get_percent(r6_q10, 1) + get_percent(r6_q10, 2)
+r6_pct_understand_yes <- get_percent(r6_q11, 1)
+r6_pct_confidential_yes <- get_percent(r6_q12, 1)
+
+r6_n_sig_above <- r6_results |> filter(p < .05, mean > 3) |> nrow()
+r6_highest_item <- r6_results |> slice_max(mean, n = 1, with_ties = FALSE) |> pull(description)
+r6_lowest_item <- r6_results |> slice_min(mean, n = 1, with_ties = FALSE) |> pull(description)
+r6_lowest_mean <- round(r6_results |> slice_min(mean, n = 1, with_ties = FALSE) |> pull(mean), 2)
+r6_highest_mean <- round(r6_results |> slice_max(mean, n = 1, with_ties = FALSE) |> pull(mean), 2)
+```
+
+## R6 Interpretation
+
+Members view EFCU's operations favorably. For statements, `r r6_pct_about_right`% say they arrive about as often as they should, `r r6_pct_accuracy_good`% rate accuracy good or excellent, `r r6_pct_understand_yes`% find them easy to understand, and `r r6_pct_confidential_yes`% say their account information is kept confidential (@tbl-r6-freq). On the agreement items, `r r6_n_sig_above` of 5 have a mean significantly above the midpoint (@tbl-r6-ttest, @fig-r6). The highest-rated item is *`r r6_highest_item`* (`r r6_highest_mean`), and the lowest is *`r r6_lowest_item`* (`r r6_lowest_mean`).
+
+**Insight:** the basics (statements, confidentiality, overall management) are rated well. The weakest ratings are on loan-related items, which fits the board's concern about members not borrowing from the credit union. Because Q31 to Q34 are not a single scale, these are reported as separate items and not as one "operational effectiveness" score.
+
+# Summary
+
+| Question | Test | Result |
+|---|---|---|
+| R3: Attitude toward employees | One-sample t-test of the Q3 to Q6 score vs. 3 | Strongly favorable (mean `r r3_mean`) |
+| R4a: Residence and employee attitude | Independent-groups t-test | `r r4a_sig_word` difference (`r r4a_p_text`) |
+| R4b: Residence and awareness | 14 chi-square / Fisher tests | `r r4b_n_sig` of 14 significant; `r r4b_n_sig_holm` after adjustment |
+| R4c: Residence and operations | t-tests (6 items) and chi-square / Fisher tests (3 items) | Only Q34 differs (not after adjustment) |
+| R6: Operational effectiveness | Frequencies and one-sample t-tests, item by item | Favorable; loan-related items lowest |
+
+## Limitations
+
+- The sample is small (n = `r n_respondents`), and the headquarters-area group has only 57 members, so group comparisons have limited power. Several awareness tables have cells with very few members.
+- Rating items are ordinal; t-tests treat them as approximately interval.
+- The reported p-values come from many tests; the Holm-adjusted p-values are shown to account for that.
+- These are survey responses from members who returned the questionnaire, so non-response may affect how well they represent all members.
+
+# Appendix: Links
+
+Published report: [View my GitHub Pages report](https://rubencgarcia.github.io/REPO-NAME/)
+
+GitHub repo: [View my GitHub repo](https://github.com/rubencgarcia/REPO-NAME)
